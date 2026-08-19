@@ -70,8 +70,6 @@ async def webhook(request: Request):
             send_message(chat_id, "باشه، گزینه «خیر» ثبت شد.")
         elif button_id == "btn_maybe":
             send_message(chat_id, "باشه، فعلاً «شاید» رو انتخاب کردید.")
-        elif button_id == "btn_info":
-            send_message(chat_id, "این یک ربات تست دکمه‌های شیشه‌ای روی Railway است.")
         else:
             send_message(chat_id, f"دکمه ناشناخته: {button_id}")
 
