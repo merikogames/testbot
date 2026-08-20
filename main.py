@@ -10,7 +10,7 @@ from datetime import datetime
 
 MAIN_TOKEN = os.getenv("RUBIKA_TOKEN")
 BASE_URL = os.getenv("BASE_URL", "").rstrip("/")
-DB_PATH = "/data/bots.db"
+DB_PATH = "/data/bots.db"          # ← حتماً Volume روی /data باشه
 
 if not MAIN_TOKEN:
     raise ValueError("RUBIKA_TOKEN تنظیم نشده!")
@@ -21,8 +21,13 @@ app = FastAPI()
 def init_db():
     os.makedirs("/data", exist_ok=True)
     with get_db() as conn:
+        # ریست کامل جدول‌ها (برای رفع مشکل short_id)
+        conn.execute("DROP TABLE IF EXISTS bots")
+        conn.execute("DROP TABLE IF EXISTS states")
+        conn.execute("DROP TABLE IF EXISTS buttons")
+
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS bots (
+            CREATE TABLE bots (
                 owner_id TEXT PRIMARY KEY,
                 short_id TEXT UNIQUE,
                 token TEXT NOT NULL,
@@ -32,13 +37,14 @@ def init_db():
             )
         """)
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS states (
+            CREATE TABLE states (
                 user_id TEXT PRIMARY KEY,
                 state TEXT,
                 data TEXT
             )
         """)
         conn.commit()
+        print("✅ Database initialized successfully")
 
 @contextmanager
 def get_db():
@@ -50,7 +56,7 @@ def get_db():
         conn.close()
 
 def generate_short_id():
-    return secrets.token_hex(3)  # مثلاً a1b2c3 (۶ کاراکتر)
+    return secrets.token_hex(3)  # ۶ کاراکتر کوتاه
 
 # ====================== توابع کمکی ======================
 def api(token: str, method: str, data: dict = None):
@@ -142,7 +148,6 @@ async def main_webhook(request: Request):
         button_id = im.get("aux_data", {}).get("button_id")
 
         if button_id == "premium":
-            # پیام قبلی رو پاک می‌کنیم (ادیت می‌کنیم)
             edit_message(MAIN_TOKEN, chat_id, message_id, "کاربر گرامی این دکمه فعلا غیرفعال است.", inline_keypad=main_menu())
 
         elif button_id == "connect_bot":
@@ -191,7 +196,6 @@ async def main_webhook(request: Request):
                 short_id = generate_short_id()
 
                 with get_db() as conn:
-                    # مطمئن شو short_id تکراری نباشه
                     while conn.execute("SELECT 1 FROM bots WHERE short_id = ?", (short_id,)).fetchone():
                         short_id = generate_short_id()
 
@@ -226,7 +230,7 @@ async def main_webhook(request: Request):
 
     return JSONResponse({"status": "OK"})
 
-# ====================== Webhook ربات‌های کاربر (کوتاه) ======================
+# ====================== Webhook ربات‌های کاربر ======================
 @app.api_route("/w/{short_id}", methods=["POST", "HEAD"])
 async def user_bot_webhook(short_id: str, request: Request):
     if request.method == "HEAD":
