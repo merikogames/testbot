@@ -1,151 +1,343 @@
 import os
+import sqlite3
+import json
 import requests
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-import uvicorn
+from contextlib import contextmanager
+from datetime import datetime
 
 # ====================== تنظیمات ======================
-TOKEN = os.getenv("RUBIKA_TOKEN")          # توکن ربات (از Railway می‌گیری)
-BASE_URL = os.getenv("BASE_URL", "")       # آدرس عمومی Railway (اختیاری)
+MAIN_TOKEN = os.getenv("RUBIKA_TOKEN")
+BASE_URL = os.getenv("BASE_URL", "").rstrip("/")
+DB_PATH = "/data/bots.db"  # Volume Railway
 
-if not TOKEN:
-    raise ValueError("متغیر محیطی RUBIKA_TOKEN تنظیم نشده!")
-
-API = f"https://botapi.rubika.ir/v3/{TOKEN}"
+if not MAIN_TOKEN:
+    raise ValueError("RUBIKA_TOKEN تنظیم نشده!")
 
 app = FastAPI()
 
-# ====================== توابع کمکی ======================
-def send_message(chat_id: str, text: str, inline_keypad: dict = None):
+# ====================== دیتابیس ======================
+def init_db():
+    os.makedirs("/data", exist_ok=True)
+    with get_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS bots (
+                owner_id TEXT PRIMARY KEY,
+                token TEXT NOT NULL,
+                bot_username TEXT,
+                welcome_text TEXT DEFAULT 'سلام! به ربات خوش آمدید.',
+                created_at TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS states (
+                user_id TEXT PRIMARY KEY,
+                state TEXT,
+                data TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS buttons (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id TEXT,
+                button_type TEXT,  -- panel or glass
+                button_text TEXT,
+                response_text TEXT
+            )
+        """)
+        conn.commit()
+
+@contextmanager
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+# ====================== توابع کمکی روبیکا ======================
+def api(token: str, method: str, data: dict = None):
+    url = f"https://botapi.rubika.ir/v3/{token}/{method}"
+    try:
+        r = requests.post(url, json=data or {}, timeout=15)
+        return r.json()
+    except Exception as e:
+        print(f"API Error: {e}")
+        return {"status": "ERROR", "error": str(e)}
+
+def send_message(token: str, chat_id: str, text: str, inline_keypad=None, chat_keypad=None):
+    payload = {"chat_id": chat_id, "text": text}
+    if inline_keypad:
+        payload["inline_keypad"] = inline_keypad
+    if chat_keypad:
+        payload["chat_keypad"] = chat_keypad
+        payload["chat_keypad_type"] = "New"
+    return api(token, "sendMessage", payload)
+
+def edit_message(token: str, chat_id: str, message_id: str, text: str, inline_keypad=None):
     payload = {
         "chat_id": chat_id,
+        "message_id": message_id,
         "text": text
     }
     if inline_keypad:
         payload["inline_keypad"] = inline_keypad
+    return api(token, "editMessageText", payload)
 
-    r = requests.post(f"{API}/sendMessage", json=payload, timeout=10)
-    return r.json()
-
-
-def make_glass_buttons():
-    """ساخت دکمه‌های شیشه‌ای نمونه"""
+def make_glass(rows):
+    """rows = [[{"id": "...", "text": "..."}], ...]"""
     return {
         "rows": [
-            {
-                "buttons": [
-                    {"id": "btn_yes", "type": "Simple", "button_text": "✅ بله"}
-                ]
-            },
-            {
-                "buttons": [
-                    {"id": "btn_no", "type": "Simple", "button_text": "❌ خیر"},
-                    {"id": "btn_maybe", "type": "Simple", "button_text": "🤔 شاید"}
-                ]
-            },
-            {
-                "buttons": [
-                    {"id": "btn_info", "type": "Simple", "button_text": "ℹ️ اطلاعات بیشتر"}
-                ]
-            }
+            {"buttons": [{"id": b["id"], "type": "Simple", "button_text": b["text"]} for b in row]}
+            for row in rows
         ]
     }
 
+# ====================== مدیریت State ======================
+def set_state(user_id: str, state: str, data: dict = None):
+    with get_db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO states (user_id, state, data) VALUES (?, ?, ?)",
+            (user_id, state, json.dumps(data or {}))
+        )
+        conn.commit()
 
-# ====================== Webhook ها ======================
-@app.post("/webhook")
-async def webhook(request: Request):
+def get_state(user_id: str):
+    with get_db() as conn:
+        row = conn.execute("SELECT state, data FROM states WHERE user_id = ?", (user_id,)).fetchone()
+        if row:
+            return row["state"], json.loads(row["data"] or "{}")
+        return None, {}
+
+def clear_state(user_id: str):
+    with get_db() as conn:
+        conn.execute("DELETE FROM states WHERE user_id = ?", (user_id,))
+        conn.commit()
+
+# ====================== منوها ======================
+def main_menu():
+    return make_glass([
+        [{"id": "connect_bot", "text": "🔗 وصل کردن ربات"}],
+        [{"id": "my_bots", "text": "📋 لیست ربات‌های من"}],
+        [{"id": "premium", "text": "⭐ اشتراک ویژه"}]
+    ])
+
+def admin_menu():
+    return make_glass([
+        [{"id": "set_welcome", "text": "📝 متن خوش‌آمدگویی"}],
+        [{"id": "create_panel_btn", "text": "⌨️ ساخت دکمه پنلی"}],
+        [{"id": "create_glass_btn", "text": "🪟 ساخت دکمه شیشه‌ای"}],
+        [{"id": "test_bot", "text": "🧪 تست ربات"}],
+        [{"id": "back_main", "text": "🔙 بازگشت"}]
+    ])
+
+# ====================== Webhook اصلی (ربات ساز) ======================
+@app.post("/webhook/main")
+async def main_webhook(request: Request):
     data = await request.json()
-    print("دریافت شد:", data)  # برای لاگ در Railway
+    print("MAIN:", data)
 
-    # ---------- کلیک روی دکمه شیشه‌ای ----------
+    # ---------- کلیک دکمه شیشه‌ای ----------
     if "inline_message" in data:
-        inline = data["inline_message"]
-        chat_id = inline.get("chat_id")
-        button_id = inline.get("aux_data", {}).get("button_id")
+        im = data["inline_message"]
+        chat_id = im.get("chat_id")
+        user_id = im.get("sender_id")
+        button_id = im.get("aux_data", {}).get("button_id")
+        message_id = im.get("message_id")
 
-        if button_id == "btn_yes":
-            send_message(chat_id, "عالی! شما گزینه «بله» رو انتخاب کردید 🎉")
-        elif button_id == "btn_no":
-            send_message(chat_id, "باشه، گزینه «خیر» ثبت شد.")
-        elif button_id == "btn_maybe":
-            send_message(chat_id, "باشه، فعلاً «شاید» رو انتخاب کردید.")
-        elif button_id == "btn_info":
-            send_message(chat_id, "دنبال چه میگگردی؟")
-        else:
-            send_message(chat_id, f"دکمه ناشناخته: {button_id}")
+        if button_id == "premium":
+            send_message(MAIN_TOKEN, chat_id, "کاربر گرامی این دکمه فعلا غیرفعال است.", inline_keypad=main_menu())
+
+        elif button_id == "connect_bot":
+            set_state(user_id, "waiting_token")
+            send_message(MAIN_TOKEN, chat_id,
+                "برای وصل کردن ربات خودت این مراحل رو انجام بده:\n\n"
+                "۱. برو داخل روبیکا به @BotFather\n"
+                "۲. دستور /newbot رو بزن و ربات جدید بساز\n"
+                "۳. توکنی که بهت می‌ده رو کپی کن\n\n"
+                "حالا توکن ربات خود را در همین چت بدون هیچ تغییری وارد کنید:")
+
+        elif button_id == "my_bots":
+            with get_db() as conn:
+                bots = conn.execute("SELECT bot_username, created_at FROM bots WHERE owner_id = ?", (user_id,)).fetchall()
+            if not bots:
+                text = "شما هنوز هیچ رباتی وصل نکرده‌اید."
+            else:
+                text = "ربات‌های شما:\n\n" + "\n".join([f"• @{b['bot_username'] or 'بدون یوزرنیم'}" for b in bots])
+            send_message(MAIN_TOKEN, chat_id, text, inline_keypad=main_menu())
 
         return JSONResponse({"status": "OK"})
 
-    # ---------- پیام جدید (Update) ----------
+    # ---------- پیام جدید ----------
     if "update" in data:
         update = data["update"]
         if update.get("type") == "NewMessage":
             msg = update.get("new_message", {})
             chat_id = update.get("chat_id")
-            text = msg.get("text", "").strip()
+            user_id = msg.get("sender_id")
+            text = (msg.get("text") or "").strip()
 
-            # اگر دکمه chat keypad بود
-            button_id = msg.get("aux_data", {}).get("button_id")
-            if button_id:
-                send_message(chat_id, f"روی دکمه چت کلیک شد: {button_id}")
+            state, state_data = get_state(user_id)
+
+            # ----- دریافت توکن -----
+            if state == "waiting_token":
+                token = text
+                # اعتبارسنجی توکن
+                me = api(token, "getMe")
+                if me.get("status") != "OK":
+                    send_message(MAIN_TOKEN, chat_id, "❌ توکن نامعتبر است. لطفاً دوباره تلاش کنید.")
+                    return JSONResponse({"status": "OK"})
+
+                bot_info = me.get("data", {}).get("bot", {})
+                bot_username = bot_info.get("username")
+
+                with get_db() as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO bots (owner_id, token, bot_username, created_at) VALUES (?, ?, ?, ?)",
+                        (user_id, token, bot_username, datetime.now().isoformat())
+                    )
+                    conn.commit()
+
+                # ثبت webhook برای ربات کاربر
+                webhook_url = f"{BASE_URL}/webhook/{user_id}"
+                for ep in ["ReceiveUpdate", "ReceiveInlineMessage"]:
+                    api(token, "updateBotEndpoints", {"url": webhook_url, "type": ep})
+
+                clear_state(user_id)
+                send_message(MAIN_TOKEN, chat_id,
+                    f"✅ ربات شما با موفقیت وصل شد!\n\n"
+                    f"یوزرنیم: @{bot_username or 'نامشخص'}\n\n"
+                    f"حالا برو داخل ربات خودت و /start بزن تا پنل ادمین باز شود.",
+                    inline_keypad=main_menu())
                 return JSONResponse({"status": "OK"})
 
-            # پیام عادی
+            # ----- /start ربات اصلی -----
             if text.lower() in ["/start", "start", "شروع"]:
-                send_message(
-                    chat_id,
-                    "سلام! 👋\nاین یک ربات تست دکمه‌های شیشه‌ای است.\nروی یکی از دکمه‌های زیر کلیک کن:",
-                    inline_keypad=make_glass_buttons()
-                )
-            else:
-                send_message(
-                    chat_id,
-                    f"پیام شما: {text}\n\nبرای دیدن دکمه‌های شیشه‌ای، /start بزنید.",
-                    inline_keypad=make_glass_buttons()
-                )
+                send_message(MAIN_TOKEN, chat_id,
+                    "به ربات ساز مریکوبات خوش آمدید\n"
+                    "شما میتوانید با استفاده از دکمه های زیر ربات خود را بسازید.",
+                    inline_keypad=main_menu())
 
     return JSONResponse({"status": "OK"})
 
+# ====================== Webhook ربات‌های کاربران ======================
+@app.post("/webhook/{owner_id}")
+async def user_bot_webhook(owner_id: str, request: Request):
+    data = await request.json()
+    print(f"USER BOT {owner_id}:", data)
 
+    # پیدا کردن توکن صاحب ربات
+    with get_db() as conn:
+        row = conn.execute("SELECT token, welcome_text FROM bots WHERE owner_id = ?", (owner_id,)).fetchone()
+    if not row:
+        return JSONResponse({"status": "OK"})
+
+    token = row["token"]
+    welcome_text = row["welcome_text"] or "سلام! به ربات خوش آمدید."
+
+    # ---------- کلیک دکمه ----------
+    if "inline_message" in data:
+        im = data["inline_message"]
+        chat_id = im.get("chat_id")
+        user_id = im.get("sender_id")
+        button_id = im.get("aux_data", {}).get("button_id")
+
+        # فقط صاحب ربات می‌تونه پنل ادمین ببینه
+        is_owner = (user_id == owner_id)
+
+        if button_id == "set_welcome" and is_owner:
+            set_state(user_id, "waiting_welcome")
+            send_message(token, chat_id, "متن خوش‌آمدگویی جدید را وارد کنید:")
+
+        elif button_id == "create_panel_btn" and is_owner:
+            set_state(user_id, "waiting_panel_btn_text")
+            send_message(token, chat_id, "متن دکمه پنلی را وارد کنید:")
+
+        elif button_id == "create_glass_btn" and is_owner:
+            set_state(user_id, "waiting_glass_btn_text")
+            send_message(token, chat_id, "متن دکمه شیشه‌ای را وارد کنید:")
+
+        elif button_id == "test_bot" and is_owner:
+            set_state(user_id, "test_mode")
+            send_message(token, chat_id, welcome_text,
+                inline_keypad=make_glass([[{"id": "back_admin", "text": "🔙 بازگشت به پنل ادمین"}]]))
+
+        elif button_id == "back_admin" and is_owner:
+            clear_state(user_id)
+            send_message(token, chat_id, "به پنل ادمین برگشتید.", inline_keypad=admin_menu())
+
+        elif button_id == "confirm_welcome" and is_owner:
+            state, sdata = get_state(user_id)
+            new_text = sdata.get("welcome_text", "")
+            with get_db() as conn:
+                conn.execute("UPDATE bots SET welcome_text = ? WHERE owner_id = ?", (new_text, owner_id))
+                conn.commit()
+            clear_state(user_id)
+            send_message(token, chat_id, "✅ متن خوش‌آمدگویی ذخیره شد.", inline_keypad=admin_menu())
+
+        elif button_id == "cancel_welcome" and is_owner:
+            clear_state(user_id)
+            send_message(token, chat_id, "انصراف داده شد.", inline_keypad=admin_menu())
+
+        return JSONResponse({"status": "OK"})
+
+    # ---------- پیام جدید ----------
+    if "update" in data:
+        update = data["update"]
+        if update.get("type") == "NewMessage":
+            msg = update.get("new_message", {})
+            chat_id = update.get("chat_id")
+            user_id = msg.get("sender_id")
+            text = (msg.get("text") or "").strip()
+
+            is_owner = (user_id == owner_id)
+            state, sdata = get_state(user_id)
+
+            # ----- صاحب ربات -----
+            if is_owner:
+                if state == "waiting_welcome":
+                    set_state(user_id, "confirm_welcome", {"welcome_text": text})
+                    send_message(token, chat_id,
+                        f"متن جدید:\n\n{text}\n\nآیا تأیید می‌کنید؟",
+                        inline_keypad=make_glass([
+                            [{"id": "confirm_welcome", "text": "✅ تأیید"}, {"id": "cancel_welcome", "text": "❌ انصراف"}]
+                        ]))
+                    return JSONResponse({"status": "OK"})
+
+                if text.lower() in ["/start", "start", "شروع"] or state is None:
+                    clear_state(user_id)
+                    send_message(token, chat_id, "پنل مدیریت ربات شما:", inline_keypad=admin_menu())
+                    return JSONResponse({"status": "OK"})
+
+            # ----- کاربر عادی -----
+            else:
+                if text.lower() in ["/start", "start", "شروع"]:
+                    send_message(token, chat_id, welcome_text)
+
+    return JSONResponse({"status": "OK"})
+
+# ====================== صفحه اصلی ======================
 @app.get("/")
 async def home():
     return {
-        "status": "ربات روبیکا با دکمه‌های شیشه‌ای فعال است",
-        "token_set": bool(TOKEN),
-        "base_url": BASE_URL or "تنظیم نشده"
+        "status": "ربات ساز مریکوبات فعال است",
+        "main_token_set": bool(MAIN_TOKEN),
+        "base_url": BASE_URL
     }
 
-
-# ====================== ثبت خودکار Endpoint (اختیاری) ======================
-def register_endpoints(base_url: str):
-    """این تابع endpointها را در روبیکا ثبت می‌کند"""
-    endpoints = [
-        "ReceiveUpdate",
-        "ReceiveInlineMessage",
-        "ReceiveQuery",
-        "GetSelectionItem",
-        "SearchSelectionItems"
-    ]
-    webhook_url = f"{base_url.rstrip('/')}/webhook"
-
-    print(f"در حال ثبت endpointها روی: {webhook_url}")
-    for ep in endpoints:
-        try:
-            r = requests.post(
-                f"{API}/updateBotEndpoints",
-                json={"url": webhook_url, "type": ep},
-                timeout=15
-            )
-            print(f"  {ep}: {r.status_code} → {r.text[:100]}")
-        except Exception as e:
-            print(f"  خطا در {ep}: {e}")
-
+# ====================== استارت ======================
+@app.on_event("startup")
+def startup():
+    init_db()
+    # ثبت webhook ربات اصلی
+    if BASE_URL:
+        main_webhook_url = f"{BASE_URL}/webhook/main"
+        for ep in ["ReceiveUpdate", "ReceiveInlineMessage"]:
+            res = api(MAIN_TOKEN, "updateBotEndpoints", {"url": main_webhook_url, "type": ep})
+            print(f"Main {ep}: {res}")
 
 if __name__ == "__main__":
-    # اگر BASE_URL تنظیم شده باشد، endpointها را ثبت می‌کند
-    if BASE_URL:
-        register_endpoints(BASE_URL)
-
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
