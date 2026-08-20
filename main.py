@@ -193,6 +193,9 @@ async def main_webhook(request: Request):
 
                 # ثبت webhook برای ربات کاربر
                 webhook_url = f"{BASE_URL}/webhook/{user_id}"
+                print("==== WEBHOOK URL BEING SET ====")
+                print(webhook_url)
+                print("===============================")
                 for ep in ["ReceiveUpdate", "ReceiveInlineMessage"]:
                     res = api(token, "updateBotEndpoints", {"url": webhook_url, "type": ep})
                     print(f"User bot {ep}: {res}")
