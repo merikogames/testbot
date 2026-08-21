@@ -20,7 +20,6 @@ app = FastAPI()
 def init_db():
     os.makedirs("/data", exist_ok=True)
     with get_db() as conn:
-        # جدول‌ها را از نو می‌سازیم تا ستون‌ها درست باشند
         conn.execute("DROP TABLE IF EXISTS bots")
         conn.execute("DROP TABLE IF EXISTS states")
         conn.execute("""
@@ -28,7 +27,7 @@ def init_db():
                 owner_id TEXT PRIMARY KEY,
                 token TEXT NOT NULL,
                 bot_username TEXT,
-                path TEXT UNIQUE,           -- مثل main1, main2, ...
+                path TEXT UNIQUE,
                 welcome_text TEXT DEFAULT 'سلام! به ربات خوش آمدید.',
                 created_at TEXT
             )
@@ -87,7 +86,6 @@ def make_glass(rows):
     }
 
 def get_next_path():
-    """مسیر بعدی مثل main1, main2, ... تولید می‌کند"""
     with get_db() as conn:
         row = conn.execute("SELECT COUNT(*) as cnt FROM bots").fetchone()
         number = (row["cnt"] or 0) + 1
@@ -123,16 +121,15 @@ def main_menu():
         [{"id": "premium", "text": "⭐ اشتراک ویژه"}]
     ])
 
-# ====================== Webhook اصلی (ربات ساز) ======================
-@app.api_route("/webhook/main", methods=["POST", "HEAD"])
+# ====================== Webhook اصلی ======================
+@app.api_route("/webhook/main", methods=["POST", "HEAD", "GET"])
 async def main_webhook(request: Request):
-    if request.method == "HEAD":
+    if request.method in ["HEAD", "GET"]:
         return JSONResponse({"status": "OK"})
 
     data = await request.json()
     print("MAIN:", data)
 
-    # ---------- کلیک دکمه ----------
     if "inline_message" in data:
         im = data["inline_message"]
         chat_id = im.get("chat_id")
@@ -153,8 +150,7 @@ async def main_webhook(request: Request):
         elif button_id == "my_bots":
             with get_db() as conn:
                 bots = conn.execute(
-                    "SELECT bot_username, path, welcome_text FROM bots WHERE owner_id = ?",
-                    (user_id,)
+                    "SELECT bot_username, path FROM bots WHERE owner_id = ?", (user_id,)
                 ).fetchall()
             if not bots:
                 text = "شما هنوز هیچ رباتی وصل نکرده‌اید."
@@ -171,7 +167,6 @@ async def main_webhook(request: Request):
 
         return JSONResponse({"status": "OK"})
 
-    # ---------- پیام جدید ----------
     if "update" in data:
         update = data["update"]
         if update.get("type") == "NewMessage":
@@ -180,13 +175,11 @@ async def main_webhook(request: Request):
             user_id = msg.get("sender_id")
             text = (msg.get("text") or "").strip()
 
-            # فقط پیوی
             if not chat_id.startswith("b0"):
                 return JSONResponse({"status": "OK"})
 
-            state, sdata = get_state(user_id)
+            state, _ = get_state(user_id)
 
-            # دریافت توکن
             if state == "waiting_token":
                 token = text
                 me = api(token, "getMe")
@@ -196,8 +189,7 @@ async def main_webhook(request: Request):
 
                 bot_info = me.get("data", {}).get("bot", {})
                 bot_username = bot_info.get("username")
-
-                path = get_next_path()  # main1, main2, ...
+                path = get_next_path()
 
                 with get_db() as conn:
                     conn.execute(
@@ -206,7 +198,6 @@ async def main_webhook(request: Request):
                     )
                     conn.commit()
 
-                # ثبت webhook دقیقاً مثل ربات اصلی
                 webhook_url = f"{BASE_URL}/webhook/{path}"
                 print("==== WEBHOOK URL BEING SET ====")
                 print(webhook_url)
@@ -220,43 +211,33 @@ async def main_webhook(request: Request):
                 send_message(MAIN_TOKEN, chat_id,
                     f"✅ ربات شما وصل شد!\n"
                     f"یوزرنیم: @{bot_username or 'نامشخص'}\n"
-                    f"مسیر: /webhook/{path}\n\n"
-                    f"اگر روبیکا قبول کرد، حالا می‌توانید از ربات خود استفاده کنید.",
+                    f"مسیر: /webhook/{path}",
                     inline_keypad=main_menu())
                 return JSONResponse({"status": "OK"})
 
-            # دریافت متن خوش‌آمدگویی
             if state == "waiting_welcome":
                 with get_db() as conn:
-                    conn.execute(
-                        "UPDATE bots SET welcome_text = ? WHERE owner_id = ?",
-                        (text, user_id)
-                    )
+                    conn.execute("UPDATE bots SET welcome_text = ? WHERE owner_id = ?", (text, user_id))
                     conn.commit()
                 clear_state(user_id)
-                send_message(MAIN_TOKEN, chat_id,
-                             f"✅ متن خوش‌آمدگویی ذخیره شد:\n\n{text}",
-                             inline_keypad=main_menu())
+                send_message(MAIN_TOKEN, chat_id, f"✅ متن خوش‌آمدگویی ذخیره شد:\n\n{text}", inline_keypad=main_menu())
                 return JSONResponse({"status": "OK"})
 
-            # /start
             if text.lower() in ["/start", "start", "شروع"]:
                 send_message(MAIN_TOKEN, chat_id,
-                    "به ربات‌ساز مریکوبات خوش آمدید\n"
-                    "با دکمه‌های زیر ربات خود را بسازید و مدیریت کنید.",
+                    "به ربات‌ساز مریکوبات خوش آمدید\nبا دکمه‌های زیر ربات خود را بسازید و مدیریت کنید.",
                     inline_keypad=main_menu())
 
     return JSONResponse({"status": "OK"})
 
 
-# ====================== Webhook ربات‌های کاربر (دقیقاً مثل اصلی) ======================
-@app.api_route("/webhook/{path}", methods=["POST", "HEAD"])
+# ====================== Webhook ربات‌های کاربر (با پشتیبانی GET) ======================
+@app.api_route("/webhook/{path}", methods=["POST", "HEAD", "GET"])
 async def user_bot_webhook(path: str, request: Request):
-    # دقیقاً همان پاسخ ربات اصلی
-    if request.method == "HEAD":
+    # دقیقاً مثل ربات اصلی
+    if request.method in ["HEAD", "GET"]:
         return JSONResponse({"status": "OK"})
 
-    # پیدا کردن توکن از روی path
     with get_db() as conn:
         bot = conn.execute("SELECT * FROM bots WHERE path = ?", (path,)).fetchone()
 
@@ -267,15 +248,6 @@ async def user_bot_webhook(path: str, request: Request):
     data = await request.json()
     print(f"USER BOT ({path}):", data)
 
-    # ---------- کلیک دکمه ----------
-    if "inline_message" in data:
-        im = data["inline_message"]
-        chat_id = im.get("chat_id")
-        user_id = im.get("sender_id")
-        # فعلاً فقط لاگ می‌کنیم (بعداً پنل ادمین اضافه می‌شود)
-        return JSONResponse({"status": "OK"})
-
-    # ---------- پیام جدید ----------
     if "update" in data:
         update = data["update"]
         if update.get("type") == "NewMessage":
@@ -290,7 +262,6 @@ async def user_bot_webhook(path: str, request: Request):
     return JSONResponse({"status": "OK"})
 
 
-# ====================== صفحه اصلی ======================
 @app.get("/")
 async def home():
     return {
@@ -300,7 +271,6 @@ async def home():
     }
 
 
-# ====================== استارت ======================
 @app.on_event("startup")
 def startup():
     init_db()
@@ -309,7 +279,3 @@ def startup():
         for ep in ["ReceiveUpdate", "ReceiveInlineMessage"]:
             res = api(MAIN_TOKEN, "updateBotEndpoints", {"url": webhook_url, "type": ep})
             print(f"Main {ep}: {res}")
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
