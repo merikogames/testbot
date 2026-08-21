@@ -2,9 +2,9 @@ import os
 import sqlite3
 import json
 import requests
+import subprocess
 import time
 import secrets
-import subprocess
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from contextlib import contextmanager
@@ -65,38 +65,51 @@ def get_db():
     finally:
         conn.close()
 
-# ============== Helpers ==============
-def api_with_curl(token: str, method: str, data: dict = None):
-    """ارسال درخواست با CURL دقیقاً مثل دستوری که دستی می‌زنیم"""
-    url = f"https://botapi.rubika.ir/v3/{token}/{method}"
-    payload = json.dumps(data or {})
-    
-    # ساخت دستور curl
+# ============== تابع curl ==============
+def curl_post(url: str, data: dict, retries: int = 3, delay: int = 2):
+    """
+    با استفاده از curl واقعی درخواست می‌زنه (دقیقاً مثل دستور دستی)
+    """
+    payload = json.dumps(data).replace('"', '\\"')
     cmd = [
         "curl", "-X", "POST", url,
         "-H", "Content-Type: application/json",
         "-d", payload
     ]
-    
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        print(f"CURL output: {result.stdout}")
-        return json.loads(result.stdout)
-    except Exception as e:
-        print(f"CURL Error: {e}")
-        return {"status": "ERROR", "error": str(e)}
+    for attempt in range(retries):
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode == 0:
+                try:
+                    return json.loads(result.stdout)
+                except:
+                    return {"status": "ERROR", "error": "Invalid JSON response"}
+            else:
+                print(f"CURL attempt {attempt+1} failed: {result.stderr}")
+                if attempt < retries - 1:
+                    time.sleep(delay)
+        except Exception as e:
+            print(f"CURL error: {e}")
+            if attempt < retries - 1:
+                time.sleep(delay)
+    return {"status": "ERROR", "error": "All curl attempts failed"}
+
+# ============== Helpers ==============
+def api_curl(token: str, method: str, data: dict = None):
+    url = f"https://botapi.rubika.ir/v3/{token}/{method}"
+    return curl_post(url, data or {})
 
 def send_message(token: str, chat_id: str, text: str, inline_keypad=None):
     payload = {"chat_id": chat_id, "text": text}
     if inline_keypad:
         payload["inline_keypad"] = inline_keypad
-    return api_with_curl(token, "sendMessage", payload)
+    return api_curl(token, "sendMessage", payload)
 
 def edit_message(token: str, chat_id: str, message_id: str, text: str, inline_keypad=None):
     payload = {"chat_id": chat_id, "message_id": message_id, "text": text}
     if inline_keypad:
         payload["inline_keypad"] = inline_keypad
-    return api_with_curl(token, "editMessageText", payload)
+    return api_curl(token, "editMessageText", payload)
 
 def make_glass(rows):
     return {
@@ -191,7 +204,6 @@ async def process_webhook(data: dict, bot_token: str, owner_id: str = None, is_m
                 edit_message(bot_token, chat_id, message_id, text, inline_keypad=main_menu())
             return JSONResponse({"status": "OK"})
 
-        # ====== منوی ادمین ربات ثانویه ======
         if button_id == "set_welcome":
             set_state(user_id, "waiting_welcome")
             edit_message(bot_token, chat_id, message_id, "متن خوش‌آمدگویی جدید را وارد کنید:")
@@ -258,10 +270,9 @@ async def process_webhook(data: dict, bot_token: str, owner_id: str = None, is_m
 
             state, sdata = get_state(user_id)
 
-            # ====== دریافت توکن (ربات اصلی) ======
             if is_main and state == "waiting_token":
                 token = text
-                me = api_with_curl(token, "getMe")
+                me = api_curl(token, "getMe")
                 if me.get("status") != "OK":
                     send_message(bot_token, chat_id, "❌ توکن نامعتبر است. لطفاً دوباره تلاش کنید.")
                     return JSONResponse({"status": "OK"})
@@ -282,11 +293,11 @@ async def process_webhook(data: dict, bot_token: str, owner_id: str = None, is_m
                 print(webhook_url)
                 print("===============================")
 
-                # ثبت وب‌هوک با CURL و Cooldown بین درخواست‌ها
+                # ثبت با curl و ۳ بار تلاش
                 for ep in ["ReceiveUpdate", "ReceiveInlineMessage"]:
-                    res = api_with_curl(token, "updateBotEndpoints", {"url": webhook_url, "type": ep})
+                    res = api_curl(token, "updateBotEndpoints", {"url": webhook_url, "type": ep})
                     print(f"User bot {ep}: {res}")
-                    time.sleep(3)  # Cooldown 3 ثانیه بین درخواست‌ها
+                    time.sleep(2)  # تأخیر بین دو نوع
 
                 clear_state(user_id)
                 send_message(bot_token, chat_id,
@@ -296,7 +307,6 @@ async def process_webhook(data: dict, bot_token: str, owner_id: str = None, is_m
                     inline_keypad=main_menu())
                 return JSONResponse({"status": "OK"})
 
-            # ====== تنظیم متن خوش‌آمدگویی (ربات ثانویه) ======
             if not is_main and state == "waiting_welcome":
                 if owner_id and user_id != owner_id:
                     return JSONResponse({"status": "OK"})
@@ -308,7 +318,6 @@ async def process_webhook(data: dict, bot_token: str, owner_id: str = None, is_m
                     ]))
                 return JSONResponse({"status": "OK"})
 
-            # ====== ساخت دکمه پنلی ======
             if not is_main and state == "waiting_panel_btn_text":
                 if owner_id and user_id != owner_id:
                     return JSONResponse({"status": "OK"})
@@ -332,7 +341,6 @@ async def process_webhook(data: dict, bot_token: str, owner_id: str = None, is_m
                     ]))
                 return JSONResponse({"status": "OK"})
 
-            # ====== ساخت دکمه شیشه‌ای ======
             if not is_main and state == "waiting_glass_btn_text":
                 if owner_id and user_id != owner_id:
                     return JSONResponse({"status": "OK"})
@@ -356,7 +364,6 @@ async def process_webhook(data: dict, bot_token: str, owner_id: str = None, is_m
                     ]))
                 return JSONResponse({"status": "OK"})
 
-            # ====== /start ======
             if text.lower() in ["/start", "start", "شروع"]:
                 clear_state(user_id)
                 if is_main:
@@ -455,6 +462,6 @@ def startup():
     if BASE_URL:
         webhook_url = f"{BASE_URL}/webhook/main"
         for ep in ["ReceiveUpdate", "ReceiveInlineMessage"]:
-            res = api_with_curl(MAIN_TOKEN, "updateBotEndpoints", {"url": webhook_url, "type": ep})
+            res = api_curl(MAIN_TOKEN, "updateBotEndpoints", {"url": webhook_url, "type": ep})
             print(f"Main {ep}: {res}")
-            time.sleep(3)
+            time.sleep(2)
