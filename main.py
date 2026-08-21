@@ -13,8 +13,6 @@ DB_PATH = "/data/bots.db"
 
 if not MAIN_TOKEN:
     raise ValueError("RUBIKA_TOKEN is not set!")
-if not BASE_URL:
-    raise ValueError("BASE_URL is not set!")
 
 app = FastAPI()
 
@@ -118,7 +116,7 @@ def main_menu():
         [{"id": "premium", "text": "⭐ اشتراک ویژه"}]
     ])
 
-# ============== Webhook اصلی (ربات ساز) ==============
+# ============== Webhook اصلی ==============
 @app.api_route("/webhook/main", methods=["POST", "HEAD", "GET"])
 async def main_webhook(request: Request):
     if request.method in ["HEAD", "GET"]:
@@ -139,10 +137,10 @@ async def main_webhook(request: Request):
                 edit_message(MAIN_TOKEN, chat_id, message_id, "کاربر گرامی این دکمه فعلاً غیرفعال است.", inline_keypad=main_menu())
             elif button_id == "connect_bot":
                 set_state(user_id, "waiting_token")
-                edit_message(MAIN_TOKEN, chat_id, message_id, "توکن ربات خود را از @BotFather بگیرید و همینجا بدون هیچ تغییری بفرستید:")
+                edit_message(MAIN_TOKEN, chat_id, message_id, "توکن ربات خود را از @BotFather بگیرید و همینجا بفرستید:")
             elif button_id == "my_bots":
                 with get_db() as conn:
-                    bots = conn.execute("SELECT bot_username, path FROM bots WHERE owner_id = ?", (user_id,)).fetchall()
+                    bots = conn.execute("SELECT bot_username, path, welcome_text FROM bots WHERE owner_id = ?", (user_id,)).fetchall()
                 if not bots:
                     text = "شما هنوز هیچ رباتی وصل نکرده‌اید."
                 else:
@@ -186,7 +184,7 @@ async def main_webhook(request: Request):
                         )
                         conn.commit()
 
-                    # === استفاده از BASE_URL برای همه ===
+                    # ثبت وب‌هوک برای ربات ثانویه
                     webhook_url = f"{BASE_URL}/webhook/{path}"
                     print("==== WEBHOOK URL BEING SET ====")
                     print(webhook_url)
@@ -217,29 +215,30 @@ async def main_webhook(request: Request):
 
     except Exception as e:
         print(f"Main webhook error: {e}")
-        # همیشه ۲۰۰ برگردون تا روبیکا خطا نگیره
+    # در همه حالات ۲۰۰ برگردون
     return JSONResponse({"status": "OK"})
 
 
-# ============== Webhook ربات‌های کاربر (دقیقاً مثل اصلی) ==============
+# ============== Webhook ربات‌های کاربر (دقیقاً مشابه اصلی) ==============
 @app.api_route("/webhook/{path}", methods=["POST", "HEAD", "GET"])
 async def user_bot_webhook(path: str, request: Request):
-    # پاسخ به درخواست‌های اعتبارسنجی (HEAD/GET) دقیقاً مثل اصلی
+    # پاسخ به HEAD/GET مثل اصلی
     if request.method in ["HEAD", "GET"]:
         return JSONResponse({"status": "OK"})
 
     try:
-        # دریافت اطلاعات ربات از دیتابیس
+        # حتی اگر بدنه نامعتبر بود، خطا نده
+        data = await request.json()
+        print(f"USER BOT ({path}):", data)
+
         with get_db() as conn:
             bot = conn.execute("SELECT * FROM bots WHERE path = ?", (path,)).fetchone()
         if not bot:
             return JSONResponse({"status": "OK"})
 
         token = bot["token"]
-        data = await request.json()
-        print(f"USER BOT ({path}):", data)
 
-        # پردازش مشابه ربات اصلی (با همان ساختار)
+        # پردازش مشابه ربات اصلی (با همین ساختار)
         if "update" in data:
             update = data["update"]
             if update.get("type") == "NewMessage":
@@ -251,14 +250,13 @@ async def user_bot_webhook(path: str, request: Request):
                     welcome = bot["welcome_text"] or "سلام! به ربات خوش آمدید."
                     send_message(token, chat_id, welcome)
 
-        # اگر inline_message هم باشه، می‌تونیم بعداً اضافه کنیم
+        # اگر inline_message بود، فقط لاگ (فعلاً)
         if "inline_message" in data:
-            # فعلاً فقط لاگ
             pass
 
     except Exception as e:
-        print(f"User bot webhook error for {path}: {e}")
-        # همیشه ۲۰۰ برگردون
+        print(f"User bot webhook error: {e}")
+    # همیشه ۲۰۰
     return JSONResponse({"status": "OK"})
 
 
