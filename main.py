@@ -116,7 +116,13 @@ def main_menu():
         [{"id": "premium", "text": "⭐ اشتراک ویژه"}]
     ])
 
-# ============== Webhook اصلی ==============
+def admin_menu():
+    return make_glass([
+        [{"id": "set_welcome", "text": "📝 تنظیم متن خوش‌آمدگویی"}],
+        [{"id": "back_main", "text": "🔙 بازگشت به منوی اصلی"}]
+    ])
+
+# ============== Webhook اصلی (ربات ساز) ==============
 @app.api_route("/webhook/main", methods=["POST", "HEAD", "GET"])
 async def main_webhook(request: Request):
     if request.method in ["HEAD", "GET"]:
@@ -140,17 +146,20 @@ async def main_webhook(request: Request):
                 edit_message(MAIN_TOKEN, chat_id, message_id, "توکن ربات خود را از @BotFather بگیرید و همینجا بفرستید:")
             elif button_id == "my_bots":
                 with get_db() as conn:
-                    bots = conn.execute("SELECT bot_username, path, welcome_text FROM bots WHERE owner_id = ?", (user_id,)).fetchall()
+                    bots = conn.execute("SELECT bot_username, welcome_text FROM bots WHERE owner_id = ?", (user_id,)).fetchall()
                 if not bots:
                     text = "شما هنوز هیچ رباتی وصل نکرده‌اید."
                 else:
                     text = "ربات‌های شما:\n\n"
                     for b in bots:
-                        text += f"• @{b['bot_username'] or 'بدون یوزرنیم'}\n  مسیر: /webhook/{b['path']}\n\n"
+                        text += f"• @{b['bot_username'] or 'بدون یوزرنیم'}\n  متن خوش‌آمد: {b['welcome_text'][:30]}...\n\n"
                 edit_message(MAIN_TOKEN, chat_id, message_id, text, inline_keypad=main_menu())
             elif button_id == "set_welcome":
                 set_state(user_id, "waiting_welcome")
                 edit_message(MAIN_TOKEN, chat_id, message_id, "متن خوش‌آمدگویی جدید ربات خود را بنویسید:")
+            elif button_id == "back_main":
+                clear_state(user_id)
+                edit_message(MAIN_TOKEN, chat_id, message_id, "به منوی اصلی برگشتید.", inline_keypad=main_menu())
             return JSONResponse({"status": "OK"})
 
         if "update" in data:
@@ -184,7 +193,7 @@ async def main_webhook(request: Request):
                         )
                         conn.commit()
 
-                    # ثبت وب‌هوک برای ربات ثانویه
+                    # ثبت وب‌هوک برای ربات ثانویه (دقیقاً مثل دستوری که دستی زدی)
                     webhook_url = f"{BASE_URL}/webhook/{path}"
                     print("==== WEBHOOK URL BEING SET ====")
                     print(webhook_url)
@@ -196,7 +205,8 @@ async def main_webhook(request: Request):
 
                     clear_state(user_id)
                     send_message(MAIN_TOKEN, chat_id,
-                        f"✅ ربات شما وصل شد!\nیوزرنیم: @{bot_username or 'نامشخص'}\nمسیر: {webhook_url}",
+                        f"✅ ربات شما وصل شد!\nیوزرنیم: @{bot_username or 'نامشخص'}\nمسیر: {webhook_url}\n\n"
+                        "حالا به ربات خودتان بروید و /start بزنید تا پنل ادمین را ببینید.",
                         inline_keypad=main_menu())
                     return JSONResponse({"status": "OK"})
 
@@ -215,48 +225,82 @@ async def main_webhook(request: Request):
 
     except Exception as e:
         print(f"Main webhook error: {e}")
-    # در همه حالات ۲۰۰ برگردون
     return JSONResponse({"status": "OK"})
 
 
-# ============== Webhook ربات‌های کاربر (دقیقاً مشابه اصلی) ==============
+# ============== Webhook ربات‌های کاربر (با پنل ادمین) ==============
 @app.api_route("/webhook/{path}", methods=["POST", "HEAD", "GET"])
 async def user_bot_webhook(path: str, request: Request):
-    # پاسخ به HEAD/GET مثل اصلی
     if request.method in ["HEAD", "GET"]:
         return JSONResponse({"status": "OK"})
 
     try:
-        # حتی اگر بدنه نامعتبر بود، خطا نده
-        data = await request.json()
-        print(f"USER BOT ({path}):", data)
-
         with get_db() as conn:
             bot = conn.execute("SELECT * FROM bots WHERE path = ?", (path,)).fetchone()
         if not bot:
             return JSONResponse({"status": "OK"})
 
         token = bot["token"]
+        owner_id = bot["owner_id"]
+        data = await request.json()
+        print(f"USER BOT ({path}):", data)
 
-        # پردازش مشابه ربات اصلی (با همین ساختار)
+        # ---------- کلیک دکمه ----------
+        if "inline_message" in data:
+            im = data["inline_message"]
+            chat_id = im.get("chat_id")
+            user_id = im.get("sender_id")
+            message_id = im.get("message_id")
+            button_id = im.get("aux_data", {}).get("button_id")
+
+            # فقط صاحب ربات می‌تونه دکمه‌ها رو ببینه
+            if user_id != owner_id:
+                return JSONResponse({"status": "OK"})
+
+            if button_id == "set_welcome":
+                set_state(user_id, "waiting_welcome_user")
+                edit_message(token, chat_id, message_id, "متن خوش‌آمدگویی جدید را بنویسید:")
+            elif button_id == "back_main":
+                clear_state(user_id)
+                edit_message(token, chat_id, message_id, "به پنل ادمین برگشتید.", inline_keypad=admin_menu())
+            return JSONResponse({"status": "OK"})
+
+        # ---------- پیام جدید ----------
         if "update" in data:
             update = data["update"]
             if update.get("type") == "NewMessage":
                 msg = update.get("new_message", {})
                 chat_id = update.get("chat_id")
+                user_id = msg.get("sender_id")
                 text = (msg.get("text") or "").strip()
 
+                if not chat_id.startswith("b0"):
+                    return JSONResponse({"status": "OK"})
+
+                state, sdata = get_state(user_id)
+
+                # اگر صاحب ربات باشه و در حال تنظیم متن باشه
+                if user_id == owner_id and state == "waiting_welcome_user":
+                    with get_db() as conn:
+                        conn.execute("UPDATE bots SET welcome_text = ? WHERE owner_id = ?", (text, owner_id))
+                        conn.commit()
+                    clear_state(user_id)
+                    send_message(token, chat_id, f"✅ متن خوش‌آمدگویی ذخیره شد:\n\n{text}", inline_keypad=admin_menu())
+                    return JSONResponse({"status": "OK"})
+
+                # اگر صاحب ربات /start بزنه → پنل ادمین
+                if user_id == owner_id and text.lower() in ["/start", "start", "شروع"]:
+                    clear_state(user_id)
+                    send_message(token, chat_id, "به پنل مدیریت ربات خود خوش آمدید:", inline_keypad=admin_menu())
+                    return JSONResponse({"status": "OK"})
+
+                # کاربر عادی → متن خوش‌آمدگویی
                 if text.lower() in ["/start", "start", "شروع"]:
                     welcome = bot["welcome_text"] or "سلام! به ربات خوش آمدید."
                     send_message(token, chat_id, welcome)
 
-        # اگر inline_message بود، فقط لاگ (فعلاً)
-        if "inline_message" in data:
-            pass
-
     except Exception as e:
-        print(f"User bot webhook error: {e}")
-    # همیشه ۲۰۰
+        print(f"User bot webhook error for {path}: {e}")
     return JSONResponse({"status": "OK"})
 
 
