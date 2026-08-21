@@ -15,11 +15,11 @@ DB_PATH = "/data/bots.db"
 USER_BASE_URL = "https://testbot-production-399f.up.railway.app"
 
 if not MAIN_TOKEN:
-    raise ValueError("RUBIKA_TOKEN تنظیم نشده!")
+    raise ValueError("RUBIKA_TOKEN is not set!")
 
 app = FastAPI()
 
-# ====================== دیتابیس ======================
+# ====================== Database ======================
 def init_db():
     os.makedirs("/data", exist_ok=True)
     with get_db() as conn:
@@ -54,7 +54,7 @@ def get_db():
     finally:
         conn.close()
 
-# ====================== توابع کمکی ======================
+# ====================== Helpers ======================
 def api(token: str, method: str, data: dict = None):
     url = f"https://botapi.rubika.ir/v3/{token}/{method}"
     try:
@@ -115,7 +115,7 @@ def clear_state(user_id: str):
         conn.execute("DELETE FROM states WHERE user_id = ?", (user_id,))
         conn.commit()
 
-# ====================== منوها ======================
+# ====================== Menus ======================
 def main_menu():
     return make_glass([
         [{"id": "connect_bot", "text": "🔗 وصل کردن ربات"}],
@@ -124,7 +124,7 @@ def main_menu():
         [{"id": "premium", "text": "⭐ اشتراک ویژه"}]
     ])
 
-# ====================== Webhook اصلی ======================
+# ====================== Main Webhook ======================
 @app.api_route("/webhook/main", methods=["POST", "HEAD", "GET"])
 async def main_webhook(request: Request):
     if request.method in ["HEAD", "GET"]:
@@ -133,7 +133,6 @@ async def main_webhook(request: Request):
     data = await request.json()
     print("MAIN:", data)
 
-    # ---------- کلیک دکمه ----------
     if "inline_message" in data:
         im = data["inline_message"]
         chat_id = im.get("chat_id")
@@ -171,7 +170,6 @@ async def main_webhook(request: Request):
 
         return JSONResponse({"status": "OK"})
 
-    # ---------- پیام جدید ----------
     if "update" in data:
         update = data["update"]
         if update.get("type") == "NewMessage":
@@ -185,7 +183,6 @@ async def main_webhook(request: Request):
 
             state, _ = get_state(user_id)
 
-            # دریافت توکن
             if state == "waiting_token":
                 token = text
                 me = api(token, "getMe")
@@ -204,7 +201,6 @@ async def main_webhook(request: Request):
                     )
                     conn.commit()
 
-                # استفاده از دامنه تست برای ربات ثانویه
                 webhook_url = f"{USER_BASE_URL}/webhook/{path}"
 
                 print("==== WEBHOOK URL BEING SET ====")
@@ -223,7 +219,6 @@ async def main_webhook(request: Request):
                     inline_keypad=main_menu())
                 return JSONResponse({"status": "OK"})
 
-            # دریافت متن خوش‌آمدگویی
             if state == "waiting_welcome":
                 with get_db() as conn:
                     conn.execute("UPDATE bots SET welcome_text = ? WHERE owner_id = ?", (text, user_id))
@@ -234,7 +229,6 @@ async def main_webhook(request: Request):
                              inline_keypad=main_menu())
                 return JSONResponse({"status": "OK"})
 
-            # /start
             if text.lower() in ["/start", "start", "شروع"]:
                 send_message(MAIN_TOKEN, chat_id,
                     "به ربات‌ساز مریکوبات خوش آمدید\n"
@@ -244,7 +238,7 @@ async def main_webhook(request: Request):
     return JSONResponse({"status": "OK"})
 
 
-# ====================== Webhook ربات‌های کاربر ======================
+# ====================== User Bot Webhook ======================
 @app.api_route("/webhook/{path}", methods=["POST", "HEAD", "GET"])
 async def user_bot_webhook(path: str, request: Request):
     if request.method in ["HEAD", "GET"]:
@@ -277,4 +271,18 @@ async def user_bot_webhook(path: str, request: Request):
 @app.get("/")
 async def home():
     return {
-        "status": "ربات‌ساز مریک
+        "status": "ربات‌ساز مریکوبات فعال است",
+        "token_set": bool(MAIN_TOKEN),
+        "base_url": BASE_URL,
+        "user_base_url": USER_BASE_URL
+    }
+
+
+@app.on_event("startup")
+def startup():
+    init_db()
+    if BASE_URL:
+        webhook_url = f"{BASE_URL}/webhook/main"
+        for ep in ["ReceiveUpdate", "ReceiveInlineMessage"]:
+            res = api(MAIN_TOKEN, "updateBotEndpoints", {"url": webhook_url, "type": ep})
+            print(f"Main {ep}: {res}")
