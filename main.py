@@ -11,6 +11,9 @@ MAIN_TOKEN = os.getenv("RUBIKA_TOKEN")
 BASE_URL = os.getenv("BASE_URL", "").rstrip("/")
 DB_PATH = "/data/bots.db"
 
+# دامنه مخصوص تست برای ربات‌های ثانویه
+USER_BASE_URL = "https://testbot-production-399f.up.railway.app"
+
 if not MAIN_TOKEN:
     raise ValueError("RUBIKA_TOKEN تنظیم نشده!")
 
@@ -130,6 +133,7 @@ async def main_webhook(request: Request):
     data = await request.json()
     print("MAIN:", data)
 
+    # ---------- کلیک دکمه ----------
     if "inline_message" in data:
         im = data["inline_message"]
         chat_id = im.get("chat_id")
@@ -167,6 +171,7 @@ async def main_webhook(request: Request):
 
         return JSONResponse({"status": "OK"})
 
+    # ---------- پیام جدید ----------
     if "update" in data:
         update = data["update"]
         if update.get("type") == "NewMessage":
@@ -180,6 +185,7 @@ async def main_webhook(request: Request):
 
             state, _ = get_state(user_id)
 
+            # دریافت توکن
             if state == "waiting_token":
                 token = text
                 me = api(token, "getMe")
@@ -198,7 +204,9 @@ async def main_webhook(request: Request):
                     )
                     conn.commit()
 
-                webhook_url = f"{BASE_URL}/webhook/{path}"
+                # استفاده از دامنه تست برای ربات ثانویه
+                webhook_url = f"{USER_BASE_URL}/webhook/{path}"
+
                 print("==== WEBHOOK URL BEING SET ====")
                 print(webhook_url)
                 print("===============================")
@@ -211,30 +219,34 @@ async def main_webhook(request: Request):
                 send_message(MAIN_TOKEN, chat_id,
                     f"✅ ربات شما وصل شد!\n"
                     f"یوزرنیم: @{bot_username or 'نامشخص'}\n"
-                    f"مسیر: /webhook/{path}",
+                    f"مسیر تست: {webhook_url}",
                     inline_keypad=main_menu())
                 return JSONResponse({"status": "OK"})
 
+            # دریافت متن خوش‌آمدگویی
             if state == "waiting_welcome":
                 with get_db() as conn:
                     conn.execute("UPDATE bots SET welcome_text = ? WHERE owner_id = ?", (text, user_id))
                     conn.commit()
                 clear_state(user_id)
-                send_message(MAIN_TOKEN, chat_id, f"✅ متن خوش‌آمدگویی ذخیره شد:\n\n{text}", inline_keypad=main_menu())
+                send_message(MAIN_TOKEN, chat_id,
+                             f"✅ متن خوش‌آمدگویی ذخیره شد:\n\n{text}",
+                             inline_keypad=main_menu())
                 return JSONResponse({"status": "OK"})
 
+            # /start
             if text.lower() in ["/start", "start", "شروع"]:
                 send_message(MAIN_TOKEN, chat_id,
-                    "به ربات‌ساز مریکوبات خوش آمدید\nبا دکمه‌های زیر ربات خود را بسازید و مدیریت کنید.",
+                    "به ربات‌ساز مریکوبات خوش آمدید\n"
+                    "با دکمه‌های زیر ربات خود را بسازید و مدیریت کنید.",
                     inline_keypad=main_menu())
 
     return JSONResponse({"status": "OK"})
 
 
-# ====================== Webhook ربات‌های کاربر (با پشتیبانی GET) ======================
+# ====================== Webhook ربات‌های کاربر ======================
 @app.api_route("/webhook/{path}", methods=["POST", "HEAD", "GET"])
 async def user_bot_webhook(path: str, request: Request):
-    # دقیقاً مثل ربات اصلی
     if request.method in ["HEAD", "GET"]:
         return JSONResponse({"status": "OK"})
 
@@ -265,17 +277,4 @@ async def user_bot_webhook(path: str, request: Request):
 @app.get("/")
 async def home():
     return {
-        "status": "ربات‌ساز مریکوبات فعال است",
-        "token_set": bool(MAIN_TOKEN),
-        "base_url": BASE_URL
-    }
-
-
-@app.on_event("startup")
-def startup():
-    init_db()
-    if BASE_URL:
-        webhook_url = f"{BASE_URL}/webhook/main"
-        for ep in ["ReceiveUpdate", "ReceiveInlineMessage"]:
-            res = api(MAIN_TOKEN, "updateBotEndpoints", {"url": webhook_url, "type": ep})
-            print(f"Main {ep}: {res}")
+        "status": "ربات‌ساز مریک
