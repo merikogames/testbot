@@ -2,11 +2,12 @@ import os
 import sqlite3
 import json
 import requests
+import time
+import secrets
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from contextlib import contextmanager
 from datetime import datetime
-import secrets
 
 MAIN_TOKEN = os.getenv("RUBIKA_TOKEN")
 BASE_URL = os.getenv("BASE_URL", "").rstrip("/")
@@ -66,8 +67,10 @@ def get_db():
 # ============== Helpers ==============
 def api(token: str, method: str, data: dict = None):
     url = f"https://botapi.rubika.ir/v3/{token}/{method}"
+    headers = {"Content-Type": "application/json"}
+    payload = json.dumps(data or {})
     try:
-        r = requests.post(url, json=data or {}, timeout=20)
+        r = requests.post(url, data=payload, headers=headers, timeout=30)
         return r.json()
     except Exception as e:
         print(f"API Error: {e}")
@@ -97,9 +100,6 @@ def get_next_path():
     with get_db() as conn:
         row = conn.execute("SELECT COUNT(*) as cnt FROM bots").fetchone()
         return f"main{(row['cnt'] or 0) + 1}"
-
-def generate_button_id():
-    return secrets.token_hex(4)
 
 # ============== State ==============
 def set_state(user_id: str, state: str, data: dict = None):
@@ -148,7 +148,6 @@ def test_mode_menu():
 async def process_webhook(data: dict, bot_token: str, owner_id: str = None, is_main: bool = False):
     print("PROCESSING:", data)
 
-    # ---------- کلیک دکمه ----------
     if "inline_message" in data:
         im = data["inline_message"]
         chat_id = im.get("chat_id")
@@ -156,11 +155,9 @@ async def process_webhook(data: dict, bot_token: str, owner_id: str = None, is_m
         message_id = im.get("message_id")
         button_id = im.get("aux_data", {}).get("button_id")
 
-        # اگر ربات ثانویه باشد و کاربر صاحب ربات نباشد، هیچ کاری نکن
         if not is_main and owner_id and user_id != owner_id:
             return JSONResponse({"status": "OK"})
 
-        # ====== منوی اصلی (ربات ساز) ======
         if is_main:
             if button_id == "premium":
                 edit_message(bot_token, chat_id, message_id, "کاربر گرامی این دکمه فعلاً غیرفعال است.", inline_keypad=main_menu())
@@ -184,7 +181,6 @@ async def process_webhook(data: dict, bot_token: str, owner_id: str = None, is_m
                 edit_message(bot_token, chat_id, message_id, text, inline_keypad=main_menu())
             return JSONResponse({"status": "OK"})
 
-        # ====== منوی ادمین (ربات ثانویه) ======
         if button_id == "set_welcome":
             set_state(user_id, "waiting_welcome")
             edit_message(bot_token, chat_id, message_id, "متن خوش‌آمدگویی جدید را وارد کنید:")
@@ -223,7 +219,6 @@ async def process_webhook(data: dict, bot_token: str, owner_id: str = None, is_m
             btn_response = sdata.get("response_text", "")
             btn_type = sdata.get("button_type", "panel")
             
-            # ذخیره دکمه در دیتابیس
             with get_db() as conn:
                 conn.execute(
                     "INSERT INTO buttons (owner_id, button_type, button_text, response_text, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -239,7 +234,6 @@ async def process_webhook(data: dict, bot_token: str, owner_id: str = None, is_m
 
         return JSONResponse({"status": "OK"})
 
-    # ---------- پیام جدید ----------
     if "update" in data:
         update = data["update"]
         if update.get("type") == "NewMessage":
@@ -253,7 +247,6 @@ async def process_webhook(data: dict, bot_token: str, owner_id: str = None, is_m
 
             state, sdata = get_state(user_id)
 
-            # ====== دریافت توکن (فقط برای ربات اصلی) ======
             if is_main and state == "waiting_token":
                 token = text
                 me = api(token, "getMe")
@@ -280,6 +273,7 @@ async def process_webhook(data: dict, bot_token: str, owner_id: str = None, is_m
                 for ep in ["ReceiveUpdate", "ReceiveInlineMessage"]:
                     res = api(token, "updateBotEndpoints", {"url": webhook_url, "type": ep})
                     print(f"User bot {ep}: {res}")
+                    time.sleep(1)
 
                 clear_state(user_id)
                 send_message(bot_token, chat_id,
@@ -289,7 +283,6 @@ async def process_webhook(data: dict, bot_token: str, owner_id: str = None, is_m
                     inline_keypad=main_menu())
                 return JSONResponse({"status": "OK"})
 
-            # ====== تنظیم متن خوش‌آمدگویی (ربات ثانویه) ======
             if not is_main and state == "waiting_welcome":
                 if owner_id and user_id != owner_id:
                     return JSONResponse({"status": "OK"})
@@ -301,7 +294,6 @@ async def process_webhook(data: dict, bot_token: str, owner_id: str = None, is_m
                     ]))
                 return JSONResponse({"status": "OK"})
 
-            # ====== ساخت دکمه پنلی (ربات ثانویه) ======
             if not is_main and state == "waiting_panel_btn_text":
                 if owner_id and user_id != owner_id:
                     return JSONResponse({"status": "OK"})
@@ -325,7 +317,6 @@ async def process_webhook(data: dict, bot_token: str, owner_id: str = None, is_m
                     ]))
                 return JSONResponse({"status": "OK"})
 
-            # ====== ساخت دکمه شیشه‌ای (ربات ثانویه) ======
             if not is_main and state == "waiting_glass_btn_text":
                 if owner_id and user_id != owner_id:
                     return JSONResponse({"status": "OK"})
@@ -349,7 +340,6 @@ async def process_webhook(data: dict, bot_token: str, owner_id: str = None, is_m
                     ]))
                 return JSONResponse({"status": "OK"})
 
-            # ====== /start ======
             if text.lower() in ["/start", "start", "شروع"]:
                 clear_state(user_id)
                 if is_main:
@@ -357,11 +347,9 @@ async def process_webhook(data: dict, bot_token: str, owner_id: str = None, is_m
                         "به ربات‌ساز مریکوبات خوش آمدید\nشما میتوانید با استفاده از دکمه های زیر ربات خود را بسازید.",
                         inline_keypad=main_menu())
                 else:
-                    # اگر کاربر صاحب ربات باشد، پنل ادمین
                     if owner_id and user_id == owner_id:
                         send_message(bot_token, chat_id, "به پنل مدیریت ربات خود خوش آمدید:", inline_keypad=admin_menu())
                     else:
-                        # کاربر عادی → متن خوش‌آمدگویی + دکمه‌های ساخته‌شده
                         with get_db() as conn:
                             bot_row = conn.execute("SELECT welcome_text FROM bots WHERE owner_id = ?", (owner_id,)).fetchone()
                             buttons = conn.execute(
@@ -370,20 +358,16 @@ async def process_webhook(data: dict, bot_token: str, owner_id: str = None, is_m
                             ).fetchall()
                         welcome = bot_row["welcome_text"] if bot_row else "سلام! به ربات خوش آمدید."
                         
-                        # ساخت دکمه‌های سفارشی
                         glass_rows = []
                         for btn in buttons:
                             if btn["button_type"] == "panel":
-                                # دکمه پنلی: یک دکمه در یک ردیف
                                 glass_rows.append([{"id": f"custom_{btn['button_text']}", "text": btn["button_text"]}])
                             elif btn["button_type"] == "glass":
-                                # دکمه شیشه‌ای: دو دکمه در یک ردیف (مثلاً)
                                 if len(glass_rows) > 0 and len(glass_rows[-1]) < 2:
                                     glass_rows[-1].append({"id": f"custom_{btn['button_text']}", "text": btn["button_text"]})
                                 else:
                                     glass_rows.append([{"id": f"custom_{btn['button_text']}", "text": btn["button_text"]}])
                         
-                        # اگر دکمه‌ای وجود داشت، نمایش بده
                         if glass_rows:
                             inline_keypad = make_glass(glass_rows)
                             send_message(bot_token, chat_id, welcome, inline_keypad=inline_keypad)
@@ -392,7 +376,7 @@ async def process_webhook(data: dict, bot_token: str, owner_id: str = None, is_m
 
     return JSONResponse({"status": "OK"})
 
-# ============== Webhook اصلی (ربات ساز) ==============
+# ============== Webhook اصلی ==============
 @app.api_route("/webhook/main", methods=["POST", "HEAD", "GET"])
 async def main_webhook(request: Request):
     if request.method in ["HEAD", "GET"]:
@@ -419,12 +403,10 @@ async def user_bot_webhook(path: str, request: Request):
 
         data = await request.json()
         
-        # پردازش دکمه‌های سفارشی (کاربران عادی)
         if "inline_message" in data:
             im = data["inline_message"]
             button_id = im.get("aux_data", {}).get("button_id")
             if button_id and button_id.startswith("custom_"):
-                # پیدا کردن دکمه از دیتابیس
                 btn_text = button_id.replace("custom_", "")
                 with get_db() as conn:
                     btn = conn.execute(
@@ -458,3 +440,4 @@ def startup():
         for ep in ["ReceiveUpdate", "ReceiveInlineMessage"]:
             res = api(MAIN_TOKEN, "updateBotEndpoints", {"url": webhook_url, "type": ep})
             print(f"Main {ep}: {res}")
+            time.sleep(1)
